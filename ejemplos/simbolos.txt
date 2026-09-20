@@ -1,0 +1,5 @@
+# Lista de símbolos a buscar (una por línea)
+# Las líneas con # se ignoran
+miFuncion
+otraFuncion
+constanteImportante

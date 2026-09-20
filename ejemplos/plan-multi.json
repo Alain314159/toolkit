@@ -1,0 +1,26 @@
+[
+  {
+    "file": "src/App.vue",
+    "idempotent": "SECCIONES_SWIPE",
+    "ops": [
+      {
+        "insertBefore": {
+          "anchor": "// Consejos utiles",
+          "content": "// Secciones navegables con swipe horizontal\nconst SECCIONES_SWIPE = ['dashboard', 'ventas', 'compras', 'inventario'];\n\n"
+        }
+      }
+    ]
+  },
+  {
+    "file": "src/styles.css",
+    "idempotent": "touch-action: pan-y",
+    "ops": [
+      {
+        "replace": {
+          "old": "main {\n  padding: .85rem .8rem 6.5rem;\n}",
+          "new": "main {\n  padding: .85rem .8rem 6.5rem;\n  touch-action: pan-y;\n}"
+        }
+      }
+    ]
+  }
+]

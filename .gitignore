@@ -9,7 +9,7 @@ node_modules/
 .env.*
 !.env.example
 
-# Scripts de instalación (no van al repo)
+# Scripts internos de instalación
 add-comandos.mjs
 add-multi.mjs
 fix-bugs.mjs
