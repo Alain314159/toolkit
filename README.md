@@ -21,37 +21,58 @@ Un paquete que se puede usar de dos formas:
 
 No requiere instalarse en cada proyecto. Funciona global.
 
-## Uso desde CLI
+## Comandos
 
-    # Validar un archivo (detecta tipo por extensión)
-    node ~/toolkit/toolkit.mjs validate src/App.vue
-    node ~/toolkit/toolkit.mjs validate script.py
-    node ~/toolkit/toolkit.mjs validate styles.css
+### Validación y análisis
 
-    # Info del archivo
-    node ~/toolkit/toolkit.mjs info src/App.vue
+    node ~/toolkit/toolkit.mjs validate <archivo...>   # Valida 1 o mas archivos
+    node ~/toolkit/toolkit.mjs info <archivo>          # Info del archivo
+    node ~/toolkit/toolkit.mjs stats [dir]             # Estadisticas
+    node ~/toolkit/toolkit.mjs tree [dir]              # Arbol del proyecto
 
-    # Aplicar un plan de parcheo (transaccional por defecto)
-    node ~/toolkit/toolkit.mjs apply plan.json
+### Búsqueda
 
-    # Analizar un refactor SIN aplicar
-    node ~/toolkit/toolkit.mjs analyze src/App.vue \
-      --from "// marcador inicio" \
-      --until "// marcador fin" \
-      --to "src/mixins/foo.js"
-
-    # Aplicar el refactor
-    node ~/toolkit/toolkit.mjs refactor src/App.vue \
-      --from "// marcador inicio" \
-      --until "// marcador fin" \
-      --to "src/mixins/foo.js" --apply
-
-    # Buscar referencias a un símbolo
+    node ~/toolkit/toolkit.mjs search "texto" --dir src
     node ~/toolkit/toolkit.mjs refs miFuncion --dir src
-    node ~/toolkit/toolkit.mjs refs miFuncion --exclude src/mixins/foo.js
+    node ~/toolkit/toolkit.mjs refs-multi simbolos.txt
 
-    # Buscar varias referencias a la vez
-    node ~/toolkit/toolkit.mjs refs-multi simbolos.txt --dir src
+### Parcheo
+
+    node ~/toolkit/toolkit.mjs apply plan.json
+    node ~/toolkit/toolkit.mjs apply plan.json --dry-run
+    node ~/toolkit/toolkit.mjs plan:new mi-plan.json
+
+### Refactor
+
+    node ~/toolkit/toolkit.mjs analyze src/App.vue \
+      --from "// ===== X =====" \
+      --until "// ===== Y =====" \
+      --to "src/mixins/x.js"
+
+    node ~/toolkit/toolkit.mjs refactor src/App.vue \
+      --from "// ===== X =====" \
+      --until "// ===== Y =====" \
+      --to "src/mixins/x.js" --apply
+
+    node ~/toolkit/toolkit.mjs orphans [archivo]       # Metodos sin uso
+
+### Flujo de trabajo
+
+    node ~/toolkit/toolkit.mjs verify                  # Validar + tests + build + git
+    node ~/toolkit/toolkit.mjs save "feat: algo"       # Commit + push
+    node ~/toolkit/toolkit.mjs log                     # Ver historial
+    node ~/toolkit/toolkit.mjs undo [n]                # Deshacer N cambios
+    node ~/toolkit/toolkit.mjs diff <archivo>          # Diff vs backup
+
+### Utilidades
+
+    node ~/toolkit/toolkit.mjs fix                     # Problemas comunes
+    node ~/toolkit/toolkit.mjs make:vue MiComponente   # Crear desde plantilla
+    node ~/toolkit/toolkit.mjs action                  # URL de GitHub Actions
+    node ~/toolkit/toolkit.mjs watch src/              # Vigilar cambios
+    node ~/toolkit/toolkit.mjs config                  # Ver configuracion
+    node ~/toolkit/toolkit.mjs menu                    # Menu interactivo
+    node ~/toolkit/toolkit.mjs help                    # Ayuda
 
 ## Uso como librería
 
@@ -62,13 +83,12 @@ No requiere instalarse en cada proyecto. Funciona global.
       idempotent: 'MI_MARCA_UNICA',
       ops: [
         { replace: { old: 'viejo', new: 'nuevo' } },
-        { insertAfter: { anchor: 'algo', content: '\nlinea nueva' } },
       ],
     });
 
     printReport(r);
 
-## Operaciones
+## Operaciones de parcheo
 
 | Operación | Descripción |
 |-----------|-------------|
@@ -84,7 +104,7 @@ No requiere instalarse en cada proyecto. Funciona global.
 
 | Extensión | Validador |
 |-----------|-----------|
-| `.vue` | `@vue/compiler-sfc` |
+| `.vue` | `@vue/compiler-sfc` (parser oficial) |
 | `.js .mjs .cjs .jsx` | `node --check` |
 | `.ts .tsx` | `tsc` (si está disponible) |
 | `.css .scss .less` | Balance de llaves/paréntesis |
@@ -102,103 +122,91 @@ No requiere instalarse en cada proyecto. Funciona global.
 1. **Idempotente**: si `idempotent` ya existe, no toca nada
 2. **Backup automático**: `.bak-<timestamp>` antes de escribir
 3. **Atómico**: si UNA operación falla, NO escribe nada
-4. **Transaccional**: en planes multi-archivo, si uno falla → rollback de los aplicados
+4. **Transaccional**: en planes multi-archivo, si uno falla → rollback
 5. **Validación**: compila el resultado antes de escribir
 6. **Escritura atómica**: escribe en `.tmp` y luego renombra
+7. **Historial**: cada cambio se registra en `.toolkit/history.json`
+8. **Undo**: restaura backups con `toolkit undo`
 
-## Multi-archivo transaccional
+## Flujo típico
 
-    [
-      {
-        "file": "src/App.vue",
-        "idempotent": "MARCA_1",
-        "ops": [ { "replace": { "old": "a", "new": "b" } } ]
-      },
-      {
-        "file": "src/mixins/foo.js",
-        "create": true,
-        "ops": [
-          {
-            "custom": {
-              "fn": "() => 'contenido completo'",
-              "desc": "crear archivo"
-            }
-          }
-        ]
-      }
-    ]
+    # 1. Aplicar un cambio
+    node ~/toolkit/toolkit.mjs apply plan.json
 
-Si uno falla, ninguno se aplica (o se revierten los que se aplicaron).
+    # 2. Verificar que todo este bien
+    node ~/toolkit/toolkit.mjs verify
 
-**Nota**: la función custom debe definirse en un script JS, no en JSON.
+    # 3. Guardar y subir
+    node ~/toolkit/toolkit.mjs save "feat: mi cambio"
 
-## Análisis de refactor
+    # 4. Si algo falla, deshacer
+    node ~/toolkit/toolkit.mjs undo
 
-Antes de extraer código, `analyze` te muestra:
+## Templates
 
-- Métodos que contiene el bloque
-- Dependencias internas (se van juntas)
-- Dependencias externas (`this.X` que quedan en el original)
-- Imports necesarios en el nuevo archivo
-- Constantes globales referenciadas
-- Sugerencias por tamaño
+| Tipo | Crea |
+|------|------|
+| `make:vue <Nombre>` | Componente Vue en `src/components/` |
+| `make:mixin <nombre>` | Mixin en `src/mixins/` |
+| `make:composable <useNombre>` | Composable en `src/composables/` |
+| `make:test <Nombre>` | Test con `node --test` |
+| `make:js <nombre>` | Módulo JavaScript |
+| `make:css <nombre>` | Archivo CSS |
 
-    node ~/toolkit/toolkit.mjs analyze src/App.vue \
-      --from "// ===== TELEGRAM BACKUP =====" \
-      --until "// ===== SEGURIDAD =====" \
-      --to "src/mixins/telegram.js"
+## Config por proyecto
 
-## Búsqueda de referencias
+Crea `.toolkitrc.json` en la raíz del proyecto:
 
-Cuando extraes un método, `refs` te dice dónde más se usa:
+    {
+      "dir": "src",
+      "exclude": ["src/generated"],
+      "backup": true,
+      "color": true
+    }
 
-    node ~/toolkit/toolkit.mjs refs miFuncion --dir src --context 2
+El toolkit lo lee automáticamente desde cualquier subdirectorio.
 
 ## Scripts de npm
 
-    npm test              # Corre los tests
-    npm run validate-all  # Valida todos los .mjs del proyecto
-    npm run check         # Alias de validate-all
-    npm run test:watch    # Tests en modo watch
+    npm test              # 42 tests
+    npm run validate-all  # Valida todos los .mjs del toolkit
+    npm run check         # validate + test
 
 ## Estructura
 
     toolkit/
-    ├── toolkit.mjs              # CLI + API pública
-    ├── package.json
-    ├── README.md
-    ├── LICENSE
-    ├── CHANGELOG.md
-    ├── .gitignore
-    ├── bin/
-    │   └── toolkit              # Ejecutable global
+    ├── toolkit.mjs              # CLI + API publica
+    ├── bin/toolkit              # Ejecutable global
     ├── lib/
-    │   ├── detect.mjs           # Detección de tipos
+    │   ├── detect.mjs           # Deteccion de tipos
     │   ├── validators.mjs       # Validadores por lenguaje
     │   ├── patch.mjs            # Operaciones + transaccional
-    │   ├── analyze.mjs          # Análisis de refactor
-    │   ├── refactor.mjs         # Aplicación de refactor
-    │   ├── refs.mjs             # Búsqueda de referencias
+    │   ├── analyze.mjs          # Analisis de refactor
+    │   ├── refactor.mjs         # Extraccion a mixin
+    │   ├── refs.mjs             # Busqueda de referencias
+    │   ├── orphans.mjs          # Metodos huerfanos
+    │   ├── search.mjs           # Busqueda de texto
+    │   ├── tree.mjs             # Arbol del proyecto
+    │   ├── stats.mjs            # Estadisticas
+    │   ├── diff.mjs             # Diff visual
+    │   ├── colors.mjs           # Colores ANSI
+    │   ├── history.mjs          # Historial + undo
+    │   ├── verify.mjs           # Verificacion completa
+    │   ├── save.mjs             # Commit + push
+    │   ├── fix.mjs              # Problemas comunes
+    │   ├── templates.mjs        # Plantillas
+    │   ├── action.mjs           # GitHub Actions
+    │   ├── watch.mjs            # Watch mode
+    │   ├── menu.mjs             # Menu interactivo
     │   └── report.mjs           # Formato de reportes
     ├── ejemplos/
-    │   ├── plan-simple.json
-    │   ├── plan-multi.json
-    │   └── simbolos.txt
-    └── tests/
-        ├── validators.test.mjs
-        ├── patch.test.mjs
-        └── refs.test.mjs
+    ├── tests/                   # 42 tests
+    └── docs/API.md
 
-## Desarrollo
+## Documentación
 
-    # Correr tests
-    npm test
-
-    # Correr un test específico
-    node --test tests/validators.test.mjs
-
-    # Validar el propio toolkit
-    npm run validate-all
+- [API completa](docs/API.md)
+- [Changelog](CHANGELOG.md)
 
 ## Licencia
 

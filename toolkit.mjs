@@ -16,6 +16,15 @@ import { statsProyecto } from './lib/stats.mjs';
 import { diffLineas, resumenDiff } from './lib/diff.mjs';
 import { c } from './lib/colors.mjs';
 import { buscarConfig, configDefault } from './lib/config.mjs';
+import { listarHistorial, deshacer, registrarCambio, registrarBatch, limpiarHistorial } from './lib/history.mjs';
+import { verificarProyecto } from './lib/verify.mjs';
+import { guardarCambios } from './lib/save.mjs';
+import { detectarProblemas, aplicarFixesAutomaticos } from './lib/fix.mjs';
+import { crearDesdeTemplate, TEMPLATES } from './lib/templates.mjs';
+import { urlActions, urlCommit, infoUltimoCommit, detectarRepo } from './lib/action.mjs';
+import { crearMenu, pedirTexto, pedirConfirmacion } from './lib/menu.mjs';
+import { vigilar } from './lib/watch.mjs';
+import { detectarHuerfanos } from './lib/orphans.mjs';
 import { aplicarPlanTransaccional } from './lib/patch.mjs';
 import { printHeader, printSuccess, printSkipped, printError, printFooter, printBackup, printInfo } from './lib/report.mjs';
 
@@ -25,7 +34,12 @@ const [,, comando, ...args] = process.argv;
 // COMANDOS
 // ============================================================
 
-async function cmdValidate(filePath) {
+async function cmdValidate(filePath, restantes) {
+  // Si hay multiples archivos, validarlos todos
+  if (restantes && restantes.length > 0) {
+    const todos = [filePath, ...restantes];
+    return await validarMultiples(todos);
+  }
   printHeader('VALIDAR');
   if (!existeArchivo(filePath)) {
     printError(filePath, ['Archivo no existe']);
@@ -36,13 +50,14 @@ async function cmdValidate(filePath) {
   const content = fs.readFileSync(filePath, 'utf8');
   printInfo('Archivo', filePath);
   printInfo('Tipo', tipo + ' (' + tipoDeValidador(tipo) + ')');
-  printInfo('Tamaño', content.length + ' bytes');
+  printInfo('Tamaño', (content.length / 1024).toFixed(2) + ' KB');
   printInfo('Lineas', content.split('\n').length);
   console.log('');
   const r = await validar(filePath, content);
   if (r.ok) {
-    console.log('  ✅ VALIDO');
-    if (r.warning) console.log('     ⚠ ' + r.warning);
+    console.log('  ' + c.verde('✅ VALIDO') + '  ' + c.cian(filePath));
+    console.log('     ' + c.gris('Validador: ' + tipoDeValidador(tipo)));
+    if (r.warning) console.log('     ' + c.amarillo('⚠ ' + r.warning));
   } else {
     printError(filePath, r.errors);
     printFooter();
@@ -100,7 +115,14 @@ async function cmdApply(planPath) {
   }
 
   const planes = Array.isArray(plan) ? plan : [plan];
-  const reporte = await aplicarPlanTransaccional(planes);
+  const esDryRun = args.includes('--dry-run') || args.includes('-n');
+
+  if (esDryRun) {
+    console.log('  ' + c.amarillo('MODO DRY-RUN') + ' (no se escribira nada)');
+    console.log('');
+  }
+
+  const reporte = await aplicarPlanTransaccional(planes, { dryRun: esDryRun });
 
   // Reporte de preparacion
   console.log('  Archivos: ' + planes.length);
@@ -138,6 +160,21 @@ async function cmdApply(planPath) {
   }
   console.log('');
   console.log('  Total commits: ' + reporte.commitCount);
+
+  // Registrar en historial
+  try {
+    const entradas = reporte.commits.map(c => ({
+      file: c.file,
+      backup: c.backup,
+      ops: c.ops || [],
+      esNuevo: false,
+      comando: 'apply',
+    }));
+    if (entradas.length > 0) {
+      registrarBatch(process.cwd(), entradas);
+      console.log('  Historial: ' + entradas.length + ' entrada(s) registrada(s)');
+    }
+  } catch (e) { console.error('Error registrando historial:', e.message); }
   printFooter();
 }
 
@@ -228,6 +265,45 @@ async function cmdAnalyze(filePath, args) {
   }
 
   const content = fs.readFileSync(filePath, 'utf8');
+
+  // Si hay --blocks, analizar cada uno
+  if (opts.blocks && opts.blocks.length > 0) {
+    console.log('  ' + c.amarillo(opts.blocks.length + ' bloque(s) a analizar'));
+    console.log('');
+    for (let bi = 0; bi < opts.blocks.length; bi++) {
+      const blk = opts.blocks[bi];
+      const partes = blk.split(':');
+      if (partes.length < 3) {
+        console.log('  ' + c.rojo('Bloque ' + (bi + 1) + ' invalido: ' + blk));
+        console.log('    Formato: nombre:inicio:fin');
+        continue;
+      }
+      const nombre = partes[0];
+      const desde = partes[1];
+      const hasta = partes[2];
+
+      console.log('-------------------------------------------');
+      console.log('  BLOQUE ' + (bi + 1) + ': ' + c.negrita(nombre));
+      console.log('-------------------------------------------');
+      const a = analizar(filePath, content, desde, hasta);
+      if (!a.ok) {
+        console.log('  ' + c.rojo('Error: ' + a.error));
+        continue;
+      }
+      console.log('  Metodos: ' + c.amarillo(a.metodos.length));
+      console.log('  Lineas: ' + a.lineas);
+      console.log('  Imports necesarios: ' + a.deps.importsUsados.length);
+      console.log('');
+      for (const m of a.metodos.slice(0, 15)) {
+        console.log('    · ' + m.nombre + (m.esAsync ? ' [async]' : ''));
+      }
+      if (a.metodos.length > 15) console.log('    ... y ' + (a.metodos.length - 15) + ' mas');
+      console.log('');
+    }
+    printFooter();
+    return;
+  }
+
   const analisis = analizar(filePath, content, opts.from, opts.until);
 
   if (!analisis.ok) {
@@ -244,6 +320,26 @@ async function cmdAnalyze(filePath, args) {
   }
 
   console.log(formatearReporte(analisis));
+
+  // Si --json, exportar a archivo
+  if (opts.json) {
+    try {
+      const datos = {
+        origen: analisis.origen,
+        marcadorInicio: analisis.marcadorInicio,
+        marcadorFin: analisis.marcadorFin,
+        lineas: analisis.lineas,
+        bytes: analisis.bytes,
+        metodos: analisis.metodos.map(m => ({ nombre: m.nombre, esAsync: m.esAsync })),
+        dependencias: analisis.deps,
+      };
+      fs.writeFileSync(opts.json, JSON.stringify(datos, null, 2) + '\n');
+      console.log('  ' + c.verde('Analisis exportado') + ' a ' + c.cian(opts.json));
+      console.log('');
+    } catch (e) {
+      console.log('  ' + c.rojo('No se pudo escribir JSON: ' + e.message));
+    }
+  }
 
   // Si --to, mostrar preview del mixin
   if (opts.to) {
@@ -308,13 +404,15 @@ async function cmdRefactor(filePath, args) {
   const reporte = await aplicarRefactor(analisis, {
     destino: opts.to,
     nombreMixin: opts.nombre,
+    refsAuto: opts.noRefs ? false : true,
+    dirProyecto: process.cwd(),
   });
 
   console.log('───────────────────────────────────────────');
   reporte.pasos.forEach(p => console.log('  ' + p));
   if (reporte.errores.length) {
     console.log('');
-    console.log('  ❌ ERRORES:');
+    console.log('  ERRORES:');
     reporte.errores.forEach(e => console.log('     ' + e));
     if (reporte.backupOrigen) {
       console.log('     Backup: ' + reporte.backupOrigen);
@@ -322,15 +420,35 @@ async function cmdRefactor(filePath, args) {
     printFooter();
     process.exit(1);
   }
-  console.log('═══════════════════════════════════════════');
-  console.log('  ✅ REFACTOR APLICADO');
+  console.log('===========================================');
+  console.log('  REFACTOR APLICADO');
   if (reporte.backupOrigen) console.log('  Backup origen: ' + reporte.backupOrigen);
-  console.log('═══════════════════════════════════════════');
+  console.log('===========================================');
+
+  // Avisar de refs externas
+  if (reporte.refsExternas && Object.keys(reporte.refsExternas).length > 0) {
+    console.log('');
+    console.log('-------------------------------------------');
+    console.log('  REFERENCIAS EXTERNAS DETECTADAS');
+    console.log('-------------------------------------------');
+    console.log('  Estos metodos se usan tambien fuera del bloque.');
+    console.log('  Verifica que las llamadas sigan funcionando con el mixin:');
+    console.log('');
+    for (const [nombre, refs] of Object.entries(reporte.refsExternas)) {
+      const total = refs.reduce((s, r) => s + r.total, 0);
+      console.log('  ' + c.amarillo(nombre) + ' (' + total + ' referencia(s)):');
+      for (const r of refs.slice(0, 3)) {
+        console.log('    · ' + c.cian(r.archivo) + ' — L' + r.matches[0].linea);
+      }
+      if (refs.length > 3) console.log('    ... y ' + (refs.length - 3) + ' archivo(s) mas');
+    }
+  }
+
   console.log('');
-  console.log('  ▶  Falta:');
+  console.log('  Falta manualmente:');
   console.log('     1. Añadir el import del mixin en ' + filePath);
   console.log('     2. Añadirlo a "mixins: [...]"');
-  console.log('     3. Probar en dev');
+  console.log('     3. node toolkit.mjs verify (validar todo)');
   console.log('');
 }
 
@@ -344,6 +462,12 @@ function parsearArgs(args) {
     else if (a === '--style') opts.style = args[++i];
     else if (a === '--nombre') opts.nombre = args[++i];
     else if (a === '--apply') opts.apply = true;
+    else if (a === '--no-refs') opts.noRefs = true;
+    else if (a === '--json') opts.json = args[++i];
+    else if (a === '--block') {
+      if (!opts.blocks) opts.blocks = [];
+      opts.blocks.push(args[++i]);
+    }
   }
   return opts;
 }
@@ -654,6 +778,617 @@ async function cmdConfig(args) {
   printFooter();
 }
 
+async function cmdLog(args) {
+  printHeader('HISTORIAL');
+  const dirBase = process.cwd();
+  const opts = { limite: 20, file: null };
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--limit' || args[i] === '-n') opts.limite = parseInt(args[++i]) || 20;
+    else if (args[i] === '--file' || args[i] === '-f') opts.file = args[++i];
+  }
+
+  const entradas = listarHistorial(dirBase, opts);
+
+  if (entradas.length === 0) {
+    console.log('  (historial vacio)');
+    printFooter();
+    return;
+  }
+
+  console.log('  Ultimos ' + entradas.length + ' cambio(s)');
+  if (opts.file) console.log('  Filtrado por: ' + c.cian(opts.file));
+  console.log('');
+  console.log('-------------------------------------------');
+
+  for (const e of entradas) {
+    const fecha = new Date(e.fecha);
+    const fstr = fecha.toLocaleDateString('es') + ' ' + String(fecha.getHours()).padStart(2, '0') + ':' + String(fecha.getMinutes()).padStart(2, '0');
+    console.log('');
+    console.log('  ' + c.amarillo(e.id) + '  ' + c.gris(fstr));
+    console.log('  ' + c.cian(e.file) + (e.esNuevo ? c.verde(' [nuevo]') : ''));
+    if (e.ops && e.ops.length) {
+      for (const op of e.ops.slice(0, 3)) {
+        console.log('    · ' + op);
+      }
+      if (e.ops.length > 3) console.log('    ... (' + (e.ops.length - 3) + ' mas)');
+    }
+    if (e.backup) console.log('    ' + c.gris('backup: ' + e.backup));
+  }
+  console.log('');
+  console.log('  Para deshacer: ' + c.verde('node toolkit.mjs undo'));
+  printFooter();
+}
+
+async function cmdUndo(args) {
+  printHeader('DESHACER');
+  const dirBase = process.cwd();
+  let cantidad = 1;
+  let file = null;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--file' || args[i] === '-f') file = args[++i];
+    else if (/^\d+$/.test(args[i])) cantidad = parseInt(args[i]);
+  }
+
+  const r = deshacer(dirBase, cantidad, { file });
+
+  if (!r.ok) {
+    console.log('  ' + c.rojo(r.error));
+    printFooter();
+    process.exit(1);
+  }
+
+  console.log('  Deshechos: ' + r.cantidad + ' cambio(s)');
+  console.log('');
+  for (const d of r.deshechos) {
+    if (d.ok) {
+      console.log('  ' + c.verde('OK') + '  ' + c.cian(d.file) + ' (' + d.accion + ')');
+    } else {
+      console.log('  ' + c.rojo('FALLO') + '  ' + c.cian(d.file) + ' — ' + d.error);
+    }
+  }
+  printFooter();
+}
+
+async function cmdVerify(args) {
+  printHeader('VERIFICAR PROYECTO');
+  const dirBase = process.cwd();
+  let correrTests = true;
+  let correrBuild = true;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--no-tests') correrTests = false;
+    else if (args[i] === '--no-build') correrBuild = false;
+    else if (args[i] === '--fast') { correrTests = false; correrBuild = false; }
+  }
+
+  console.log('  Directorio: ' + c.cian(dirBase));
+  console.log('  Tests:  ' + (correrTests ? c.verde('si') : c.gris('no')));
+  console.log('  Build:  ' + (correrBuild ? c.verde('si') : c.gris('no')));
+  console.log('');
+
+  const r = await verificarProyecto(dirBase, { correrTests, correrBuild });
+
+  for (const paso of r.pasos) {
+    console.log('-------------------------------------------');
+    if (paso.saltado) {
+      console.log('  ' + c.gris('⏭') + '  ' + c.negrita(paso.nombre) + ' — ' + c.gris(paso.saltado));
+    } else if (paso.ok) {
+      console.log('  ' + c.verde('OK') + '  ' + c.negrita(paso.nombre));
+    } else {
+      console.log('  ' + c.rojo('FALLO') + '  ' + c.negrita(paso.nombre));
+      for (const d of paso.detalles) {
+        const lineas = (typeof d === 'string' ? d : JSON.stringify(d)).split('\n');
+        for (const l of lineas.slice(0, 15)) {
+          console.log('     ' + c.gris(l));
+        }
+      }
+    }
+  }
+
+  console.log('');
+  console.log('===========================================');
+  if (r.ok) {
+    console.log('  ' + c.verde('✅ TODO OK'));
+  } else {
+    console.log('  ' + c.rojo('❌ HAY ERRORES'));
+  }
+  console.log('===========================================');
+  process.exit(r.ok ? 0 : 1);
+}
+
+async function cmdSave(args) {
+  printHeader('GUARDAR Y SUBIR');
+  const dirBase = process.cwd();
+  const mensaje = args[0];
+
+  if (!mensaje) {
+    console.error('  Falta el mensaje de commit');
+    console.log('  Uso: node toolkit.mjs save "feat: añadir algo"');
+    printFooter();
+    process.exit(1);
+  }
+
+  let push = true;
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--no-push') push = false;
+  }
+
+  const r = guardarCambios(dirBase, mensaje, { push });
+
+  console.log('');
+  for (const p of r.pasos) {
+    if (p.ok) {
+      console.log('  ' + c.verde('OK') + '  ' + p.mensaje);
+    } else {
+      console.log('  ' + c.rojo('FALLO') + '  ' + p.mensaje);
+      if (p.detalle) {
+        for (const l of p.detalle.split('\n').slice(0, 10)) {
+          console.log('     ' + c.gris(l));
+        }
+      }
+    }
+  }
+
+  if (r.ok) {
+    console.log('');
+    if (r.hash) console.log('  Commit: ' + c.amarillo(r.hash));
+    if (r.repo) console.log('  Repo:   ' + c.cian(r.repo));
+    if (r.actionsUrl) console.log('  Actions: ' + c.cian(r.actionsUrl));
+  }
+
+  printFooter();
+  process.exit(r.ok ? 0 : 1);
+}
+
+async function cmdFix(args) {
+  printHeader('FIX - PROBLEMAS DETECTADOS');
+  const dirBase = process.cwd();
+  const soloAuto = args.includes('--auto');
+  const sinFixes = args.includes('--dry-run');
+
+  console.log('  Directorio: ' + c.cian(dirBase));
+  console.log('');
+
+  const problemas = detectarProblemas(dirBase);
+
+  if (problemas.length === 0) {
+    console.log('  ' + c.verde('✅ Todo limpio'));
+    printFooter();
+    return;
+  }
+
+  console.log('-------------------------------------------');
+  console.log('  ' + problemas.length + ' problema(s) encontrado(s)');
+  console.log('-------------------------------------------');
+
+  for (const p of problemas) {
+    console.log('');
+    const tag = p.automatico ? c.verde('[auto]') : c.amarillo('[manual]');
+    console.log('  ' + tag + ' ' + c.negrita(p.titulo));
+    console.log('    ' + c.gris(p.detalle));
+    if (p.detalles) {
+      for (const d of p.detalles.slice(0, 5)) {
+        console.log('      ' + c.gris(d.archivo + ':' + d.linea + ' — ' + d.texto.slice(0, 60)));
+      }
+      if (p.detalles.length > 5) console.log('      ' + c.gris('... y ' + (p.detalles.length - 5) + ' mas'));
+    }
+    if (p.fix) console.log('    Fix: ' + c.cian(p.fix));
+  }
+
+  console.log('');
+  console.log('-------------------------------------------');
+
+  const automaticos = problemas.filter(p => p.automatico);
+  if (automaticos.length === 0) {
+    console.log('  No hay fixes automaticos disponibles');
+    printFooter();
+    return;
+  }
+
+  if (sinFixes) {
+    console.log('  Se aplicarian ' + automaticos.length + ' fix(es) automaticos');
+    printFooter();
+    return;
+  }
+
+  const fixes = aplicarFixesAutomaticos(dirBase, problemas);
+  console.log('  Fixes aplicados:');
+  for (const f of fixes) {
+    if (f.ok) console.log('  ' + c.verde('OK') + '  ' + f.mensaje);
+    else console.log('  ' + c.rojo('FALLO') + '  ' + f.mensaje);
+  }
+  printFooter();
+}
+
+async function cmdMake(args) {
+  printHeader('CREAR ARCHIVO');
+  const dirBase = process.cwd();
+
+  if (args.length < 1) {
+    console.log('  Uso: node toolkit.mjs make:<tipo> <nombre> [--dir <ruta>]');
+    console.log('');
+    console.log('  Tipos disponibles:');
+    for (const [tipo, info] of Object.entries(TEMPLATES)) {
+      console.log('    ' + c.amarillo(tipo.padEnd(12)) + ' ' + info.desc);
+    }
+    printFooter();
+    return;
+  }
+
+  // El tipo viene como make:vue, make:mixin, etc.
+  const tipoRaw = args[0];
+  let tipo = tipoRaw;
+  if (tipoRaw.includes(':')) tipo = tipoRaw.split(':')[1];
+
+  const nombre = args[1];
+  if (!nombre) {
+    console.error('  Falta el nombre del archivo');
+    printFooter();
+    process.exit(1);
+  }
+
+  const opts = {};
+  for (let i = 2; i < args.length; i++) {
+    if (args[i] === '--dir') opts.dir = args[++i];
+    else if (args[i] === '--force') opts.force = true;
+  }
+
+  const r = crearDesdeTemplate(tipo, nombre, dirBase, opts);
+
+  if (!r.ok) {
+    console.log('  ' + c.rojo('FALLO') + '  ' + r.error);
+    printFooter();
+    process.exit(1);
+  }
+
+  console.log('  ' + c.verde('Creado') + '  ' + c.cian(r.archivo));
+  console.log('');
+  console.log('  Siguiente:');
+  console.log('    ' + c.gris('node toolkit.mjs validate ' + r.archivo));
+  printFooter();
+}
+
+async function cmdMakeHelp() {
+  printHeader('TEMPLATES DISPONIBLES');
+  console.log('');
+  for (const [tipo, info] of Object.entries(TEMPLATES)) {
+    console.log('  ' + c.amarillo(tipo.padEnd(12)) + ' ' + info.desc);
+    console.log('    ' + c.gris('Crea: ' + info.dir + '/<nombre>' + info.ext));
+  }
+  console.log('');
+  console.log('  Uso: node toolkit.mjs make:<tipo> <nombre>');
+  printFooter();
+}
+
+async function cmdAction(args) {
+  printHeader('GITHUB ACTIONS');
+  const dirBase = process.cwd();
+  const sub = args[0];
+
+  const repo = detectarRepo(dirBase);
+  if (!repo) {
+    console.log('  ' + c.rojo('No es un repo de GitHub'));
+    printFooter();
+    process.exit(1);
+  }
+
+  const info = infoUltimoCommit(dirBase);
+
+  console.log('  Repo: ' + c.cian(repo.full));
+  console.log('  Commit: ' + c.amarillo(info.hashCorto));
+  console.log('  Mensaje: ' + info.mensaje);
+  console.log('  Fecha: ' + c.gris(info.fecha));
+  console.log('');
+
+  const urlA = urlActions(dirBase);
+  const urlC = urlCommit(dirBase);
+
+  if (sub === 'open' || sub === 'abrir') {
+    console.log('  Actions: ' + c.cian(urlA));
+    console.log('  Commit:  ' + c.cian(urlC));
+    console.log('');
+    console.log('  Para abrir en el navegador:');
+    console.log('    ' + c.verde('termux-open-url "' + urlA + '"'));
+  } else {
+    console.log('  URLs:');
+    console.log('    Actions: ' + c.cian(urlA));
+    console.log('    Commit:  ' + c.cian(urlC));
+    console.log('');
+    console.log('  Para abrir:');
+    console.log('    ' + c.gris('node toolkit.mjs action open'));
+  }
+  printFooter();
+}
+
+async function cmdWatch(args) {
+  printHeader('WATCH MODE');
+  const dirBase = process.cwd();
+  let dir = args[0] || 'src';
+  let plan = null;
+  let autoSave = false;
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--plan') plan = args[++i];
+    else if (args[i] === '--save') autoSave = true;
+  }
+
+  if (!fs.existsSync(dir)) {
+    console.log('  ' + c.rojo('Directorio no existe: ' + dir));
+    printFooter();
+    process.exit(1);
+  }
+
+  if (plan && !fs.existsSync(plan)) {
+    console.log('  ' + c.rojo('Plan no existe: ' + plan));
+    printFooter();
+    process.exit(1);
+  }
+
+  console.log('  Directorio: ' + c.cian(dir));
+  if (plan) console.log('  Plan: ' + c.cian(plan));
+  console.log('  Auto-save: ' + (autoSave ? c.verde('si') : c.gris('no')));
+  console.log('');
+  console.log('  ' + c.gris('Vigilando cambios... (Ctrl+C para salir)'));
+  console.log('');
+
+  const watcher = vigilar(dir, async (archivos) => {
+    const hora = new Date().toLocaleTimeString();
+    console.log('  ' + c.gris(hora) + ' ' + c.amarillo(archivos.length) + ' archivo(s) cambiaron');
+    for (const a of archivos.slice(0, 5)) {
+      console.log('    ' + c.cian(path.relative(dirBase, a)));
+    }
+
+    if (plan) {
+      try {
+        console.log('  Aplicando plan...');
+        const planContenido = JSON.parse(fs.readFileSync(plan, 'utf8'));
+        const planes = Array.isArray(planContenido) ? planContenido : [planContenido];
+        const reporte = await aplicarPlanTransaccional(planes);
+        if (reporte.ok) {
+          console.log('  ' + c.verde('OK') + ' plan aplicado (' + reporte.commitCount + ')');
+        } else {
+          console.log('  ' + c.rojo('FALLO') + ' plan no aplicado');
+        }
+      } catch (e) {
+        console.log('  ' + c.rojo('Error aplicando plan:') + ' ' + e.message);
+      }
+    }
+
+    if (autoSave) {
+      console.log('  Verificando...');
+      const v = await verificarProyecto(dirBase, { correrTests: false, correrBuild: false });
+      if (v.ok) {
+        console.log('  ' + c.verde('OK') + ' validacion pasada');
+      } else {
+        console.log('  ' + c.rojo('FALLO') + ' hay errores de validacion');
+      }
+    }
+  });
+
+  process.on('SIGINT', () => {
+    console.log('');
+    console.log('  Cerrando watch...');
+    watcher.cerrar();
+    printFooter();
+    process.exit(0);
+  });
+
+  // Mantener el proceso vivo
+  await new Promise(() => {});
+}
+
+async function cmdMenu(args) {
+  const dirBase = process.cwd();
+
+  const opciones = [
+    { etiqueta: 'Analizar el proyecto', accion: async () => {
+      const { arbol, stats } = arbolProyecto(dirBase, { maxDepth: 3 });
+      console.log('');
+      console.log(arbol);
+    }},
+    { etiqueta: 'Buscar algo', accion: async () => {
+      const patron = await pedirTexto('Que buscar?');
+      if (!patron) return;
+      const refs = buscarTexto('src', patron, { ignoreCase: true });
+      console.log('');
+      for (const r of refs) {
+        console.log('  ' + c.cian(r.archivo) + ' (' + r.total + ')');
+      }
+      if (refs.length === 0) console.log('  ' + c.gris('Sin coincidencias'));
+    }},
+    { etiqueta: 'Aplicar un plan', accion: async () => {
+      const plan = await pedirTexto('Ruta del plan (JSON)');
+      if (!plan || !fs.existsSync(plan)) { console.log('  No existe'); return; }
+      const contenido = JSON.parse(fs.readFileSync(plan, 'utf8'));
+      const planes = Array.isArray(contenido) ? contenido : [contenido];
+      const r = await aplicarPlanTransaccional(planes);
+      console.log('  ' + (r.ok ? c.verde('OK') : c.rojo('FALLO')));
+    }},
+    { etiqueta: 'Refactorizar un bloque', accion: async () => {
+      const archivo = await pedirTexto('Archivo origen', 'src/App.vue');
+      const desde = await pedirTexto('Marcador inicio');
+      const hasta = await pedirTexto('Marcador fin (vacio = hasta el final)');
+      const destino = await pedirTexto('Archivo destino');
+      if (!archivo || !desde || !destino) return;
+      const content = fs.readFileSync(archivo, 'utf8');
+      const analisis = analizar(archivo, content, desde, hasta);
+      if (!analisis.ok) { console.log('  ' + c.rojo(analisis.error)); return; }
+      console.log('  ' + analisis.metodos.length + ' metodos detectados');
+      const ok = await pedirConfirmacion('Aplicar refactor?');
+      if (!ok) return;
+      const r = await aplicarRefactor(analisis, { destino, dirProyecto: dirBase });
+      console.log('  ' + (r.ok ? c.verde('OK') : c.rojo('FALLO')));
+      if (!r.ok) r.errores.forEach(e => console.log('    ' + e));
+    }},
+    { etiqueta: 'Ver historial', accion: async () => {
+      const entradas = listarHistorial(dirBase, { limite: 10 });
+      if (entradas.length === 0) { console.log('  Sin cambios'); return; }
+      for (const e of entradas) {
+        console.log('  ' + c.amarillo(e.id) + '  ' + c.cian(e.file));
+      }
+    }},
+    { etiqueta: 'Deshacer ultimo cambio', accion: async () => {
+      const ok = await pedirConfirmacion('Deshacer el ultimo cambio?');
+      if (!ok) return;
+      const r = deshacer(dirBase, 1);
+      console.log('  ' + (r.ok ? c.verde('OK') : c.rojo('FALLO')));
+    }},
+    { etiqueta: 'Verify (validar + tests + build)', accion: async () => {
+      const r = await verificarProyecto(dirBase, { correrTests: true, correrBuild: true });
+      console.log('  ' + (r.ok ? c.verde('TODO OK') : c.rojo('HAY ERRORES')));
+    }},
+    { etiqueta: 'Ver problemas (fix --dry-run)', accion: async () => {
+      const problemas = detectarProblemas(dirBase);
+      if (problemas.length === 0) { console.log('  ' + c.verde('Todo limpio')); return; }
+      for (const p of problemas) console.log('  · ' + p.titulo);
+    }},
+    { etiqueta: 'Ver estado de GitHub Actions', accion: async () => {
+      const url = urlActions(dirBase);
+      if (!url) { console.log('  No es repo GitHub'); return; }
+      console.log('  ' + c.cian(url));
+      console.log('  Abrir: termux-open-url "' + url + '"');
+    }},
+    { etiqueta: 'Commit + push rapido', accion: async () => {
+      const msg = await pedirTexto('Mensaje del commit');
+      if (!msg) return;
+      const r = guardarCambios(dirBase, msg, { push: true });
+      console.log('  ' + (r.ok ? c.verde('OK ' + (r.hash || '')) : c.rojo('FALLO')));
+      if (r.actionsUrl) console.log('  ' + r.actionsUrl);
+    }},
+  ];
+
+  const seleccion = await crearMenu({ titulo: 'TOOLKIT', items: opciones });
+  if (seleccion.cancelado) return;
+
+  console.log('');
+  await seleccion.item.accion();
+  console.log('');
+}
+
+async function validarMultiples(archivos) {
+  printHeader('VALIDAR ' + archivos.length + ' ARCHIVO(S)');
+  console.log('');
+
+  const resultados = [];
+  let todoOk = true;
+
+  for (const archivo of archivos) {
+    if (!existeArchivo(archivo)) {
+      console.log('  ' + c.rojo('❌') + '  ' + c.cian(archivo) + '  ' + c.rojo('(no existe)'));
+      todoOk = false;
+      continue;
+    }
+    const tipo = detectarTipo(archivo);
+    const content = fs.readFileSync(archivo, 'utf8');
+    const v = await validar(archivo, content);
+    const validador = tipoDeValidador(tipo);
+
+    if (v.ok) {
+      console.log('  ' + c.verde('✅') + '  ' + c.cian(archivo.padEnd(30)) + '  ' + c.gris(validador));
+      if (v.warning) console.log('      ' + c.amarillo('⚠ ' + v.warning));
+    } else {
+      console.log('  ' + c.rojo('❌') + '  ' + c.cian(archivo.padEnd(30)) + '  ' + c.gris(validador));
+      for (const err of v.errors.slice(0, 3)) {
+        console.log('      ' + c.rojo(err));
+      }
+      todoOk = false;
+    }
+    resultados.push({ archivo, ok: v.ok });
+  }
+
+  console.log('');
+  console.log('-------------------------------------------');
+  const pasan = resultados.filter(r => r.ok).length;
+  console.log('  ' + c.verde(pasan + ' OK') + '  ·  ' + (resultados.length - pasan > 0 ? c.rojo((resultados.length - pasan) + ' FALLO') : c.gris('0 FALLO')));
+  printFooter();
+  process.exit(todoOk ? 0 : 1);
+}
+
+async function cmdOrphans(args) {
+  printHeader('METODOS HUERFANOS');
+  const dirBase = process.cwd();
+  let archivo = args[0];
+
+  if (!archivo) {
+    // Si no hay archivo, analizar todos los .vue y .js en src/
+    const srcDir = path.join(dirBase, 'src');
+    if (!fs.existsSync(srcDir)) {
+      console.log('  ' + c.rojo('No hay carpeta src/'));
+      printFooter();
+      process.exit(1);
+    }
+    const archivos = [];
+    function walk(dir) {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const e of entries) {
+        if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else if (e.name.endsWith('.vue') || e.name.endsWith('.js')) archivos.push(full);
+      }
+    }
+    walk(srcDir);
+    console.log('  Analizando ' + archivos.length + ' archivo(s) en src/');
+    console.log('');
+
+    let totalHuerfanos = 0;
+    for (const a of archivos) {
+      const r = detectarHuerfanos(a, dirBase);
+      if (r.ok && r.huerfanos.length > 0) {
+        console.log('  ' + c.cian(path.relative(dirBase, a)));
+        for (const h of r.huerfanos) {
+          console.log('    · ' + c.amarillo(h.nombre) + ' (L' + h.linea + ')');
+        }
+        totalHuerfanos += r.huerfanos.length;
+      }
+    }
+
+    console.log('');
+    if (totalHuerfanos === 0) {
+      console.log('  ' + c.verde('Sin metodos huerfanos'));
+    } else {
+      console.log('  Total: ' + c.amarillo(totalHuerfanos) + ' metodo(s) sin uso');
+      console.log('');
+      console.log('  Estos metodos ya no se llaman desde ningun lado.');
+      console.log('  Revisalos y eliminalos si no los necesitas.');
+    }
+    printFooter();
+    return;
+  }
+
+  // Analizar un archivo especifico
+  if (!fs.existsSync(archivo)) {
+    console.log('  ' + c.rojo('Archivo no existe: ' + archivo));
+    printFooter();
+    process.exit(1);
+  }
+
+  const r = detectarHuerfanos(archivo, dirBase);
+
+  if (!r.ok) {
+    console.log('  ' + c.rojo('Error: ' + r.error));
+    printFooter();
+    process.exit(1);
+  }
+
+  console.log('  Archivo: ' + c.cian(archivo));
+  console.log('  Metodos: ' + r.total);
+  console.log('');
+
+  if (r.huerfanos.length === 0) {
+    console.log('  ' + c.verde('✅ Sin metodos huerfanos'));
+    printFooter();
+    return;
+  }
+
+  console.log('  ' + c.amarillo('⚠ ' + r.huerfanos.length + ' metodo(s) sin uso:'));
+  console.log('');
+  for (const h of r.huerfanos) {
+    console.log('  · ' + c.negrita(h.nombre) + ' ' + c.gris('(L' + h.linea + ')'));
+  }
+  printFooter();
+}
+
 async function cmdHelp() {
   console.log(`
 toolkit - Herramienta universal de parcheo y validacion
@@ -662,7 +1397,7 @@ USO:
   node toolkit.mjs <comando> [args]
 
 COMANDOS:
-  validate <archivo>                 Valida un archivo segun su tipo
+  validate <archivo...>              Valida uno o varios archivos
   info <archivo>                     Muestra info del archivo
   apply <plan.json>                  Aplica un plan de parcheo
   analyze <archivo> [opciones]       Analiza un refactor SIN aplicar
@@ -675,13 +1410,43 @@ COMANDOS:
   diff <archivo> [opciones]          Muestra los cambios vs el backup
   plan:new <archivo>                 Crea un plan vacio
   config                             Muestra la configuracion
+  log [opciones]                     Ver historial de cambios
+  undo [n] [opciones]                Deshacer ultimos cambios
+  verify [opciones]                  Validar + tests + build + git status
+  save "mensaje" [opciones]          Commit + push rapido
+  orphans [archivo]                  Detecta metodos sin uso
+  fix [opciones]                     Detecta y arregla problemas comunes
+  make:<tipo> <nombre>               Crea un archivo desde plantilla
+  action [open]                      Info y URL de GitHub Actions
+  watch <dir> [opciones]             Vigila cambios (Ctrl+C para salir)
+  menu                               Menu interactivo (default sin args)
   help                               Muestra esta ayuda
+
+TEMPLATES DE MAKE:
+  make:vue <Nombre>                  Componente Vue
+  make:mixin <nombre>                Mixin
+  make:composable <useNombre>        Composable
+  make:test <Nombre>                 Test con node --test
+  make:js <nombre>                   Modulo JavaScript
+  make:css <nombre>                  Archivo CSS
+
+OPCIONES DE FIX:
+  --auto                             Aplicar solo fixes automaticos
+  --dry-run                          Ver sin aplicar
+
+OPCIONES DE WATCH:
+  --plan <archivo>                   Aplicar plan en cada cambio
+  --save                             Verificar en cada cambio
 
 OPCIONES DE ANALYZE/REFACTOR:
   --from "texto"       Marcador donde empieza el bloque
   --until "texto"      Marcador donde termina (opcional)
   --to "ruta.js"       Archivo destino
   --apply              Confirmar aplicacion (solo refactor)
+  --json <archivo>     Exportar analisis a JSON
+  --block n:i:f        Analizar multiples bloques (repetible)
+  --no-refs            No buscar referencias externas (refactor)
+  --dry-run, -n        Solo mostrar, no escribir (apply)
 
 OPCIONES DE REFS:
   --dir <dir>          Directorio donde buscar (default: src)
@@ -695,6 +1460,25 @@ OPCIONES DE SEARCH:
   --regex              Tratar el patron como regex
   --context <n>        Lineas de contexto
   --exclude <file>     Archivo a excluir
+
+OPCIONES DE LOG:
+  --limit, -n <n>      Cuantos mostrar (default: 20)
+  --file, -f <path>    Filtrar por archivo
+
+OPCIONES DE UNDO:
+  --file, -f <path>    Deshacer solo cambios de ese archivo
+  n                    Numero de cambios a deshacer (default: 1)
+
+OPCIONES DE VERIFY:
+  --no-tests           Saltar npm test
+  --no-build           Saltar npm run build
+  --fast               Saltar tests y build
+
+OPCIONES DE APPLY:
+  --dry-run, -n        Simular sin escribir
+
+OPCIONES DE SAVE:
+  --no-push            Solo commit, no push
 
 OPCIONES DE TREE:
   --depth <n>          Profundidad maxima (default: 4)
@@ -744,9 +1528,26 @@ EJEMPLO:
 // ============================================================
 
 switch (comando) {
-  case 'validate': await cmdValidate(args[0]); break;
+  case 'validate': await cmdValidate(args[0], args.slice(1)); break;
   case 'info': await cmdInfo(args[0]); break;
   case 'apply': await cmdApply(args[0]); break;
+  case 'orphans': await cmdOrphans(args); break;
+  case 'fix': await cmdFix(args); break;
+  case 'make': await cmdMakeHelp(); break;
+  case 'make:vue':
+  case 'make:mixin':
+  case 'make:composable':
+  case 'make:test':
+  case 'make:js':
+  case 'make:css':
+    await cmdMake([comando, ...args]); break;
+  case 'action': await cmdAction(args); break;
+  case 'watch': await cmdWatch(args); break;
+  case 'menu': await cmdMenu(args); break;
+  case 'log': await cmdLog(args); break;
+  case 'undo': await cmdUndo(args); break;
+  case 'verify': await cmdVerify(args); break;
+  case 'save': await cmdSave(args); break;
   case 'search': await cmdSearch(args); break;
   case 'tree': await cmdTree(args); break;
   case 'stats': await cmdStats(args); break;
@@ -761,7 +1562,12 @@ switch (comando) {
   case '--help':
   case '-h':
   case undefined:
-    await cmdHelp(); break;
+    if (process.stdin.isTTY) {
+      await cmdMenu([]);
+    } else {
+      await cmdHelp();
+    }
+    break;
   default:
     console.error('❌ Comando desconocido: ' + comando);
     console.error('   Usa: node toolkit.mjs help');
