@@ -13,12 +13,30 @@
     "validate-all": "node toolkit.mjs validate toolkit.mjs && node toolkit.mjs validate lib/detect.mjs && node toolkit.mjs validate lib/validators.mjs && node toolkit.mjs validate lib/patch.mjs && node toolkit.mjs validate lib/analyze.mjs && node toolkit.mjs validate lib/refactor.mjs && node toolkit.mjs validate lib/refs.mjs && node toolkit.mjs validate lib/report.mjs",
     "check": "npm run validate-all && npm test"
   },
-  "keywords": ["patch", "refactor", "validate", "cli", "vue", "javascript", "termux"],
+  "keywords": [
+    "patch",
+    "refactor",
+    "validate",
+    "cli",
+    "vue",
+    "javascript",
+    "termux"
+  ],
   "author": "Alain <alaincruz446@gmail.com>",
   "license": "MIT",
-  "engines": { "node": ">=18" },
-  "dependencies": { "@vue/compiler-sfc": "^3.4.38" },
-  "repository": { "type": "git", "url": "https://github.com/Alain314159/toolkit.git" },
-  "bugs": { "url": "https://github.com/Alain314159/toolkit/issues" },
-  "homepage": "https://github.com/Alain314159/toolkit#readme"
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Alain314159/toolkit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Alain314159/toolkit/issues"
+  },
+  "homepage": "https://github.com/Alain314159/toolkit#readme",
+  "optionalDependencies": {
+    "@vue/compiler-sfc": "^3.4.38"
+  }
 }

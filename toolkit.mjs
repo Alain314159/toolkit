@@ -1,3 +1,4 @@
+import { ToolkitError } from './utils/errors.mjs';
 #!/usr/bin/env node
 // toolkit.mjs - Herramienta universal de parcheo y validacion
 
@@ -44,7 +45,7 @@ async function cmdValidate(filePath, restantes) {
   if (!existeArchivo(filePath)) {
     printError(filePath, ['Archivo no existe']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   const tipo = detectarTipo(filePath);
   const content = fs.readFileSync(filePath, 'utf8');
@@ -61,7 +62,7 @@ async function cmdValidate(filePath, restantes) {
   } else {
     printError(filePath, r.errors);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   printFooter();
 }
@@ -71,7 +72,7 @@ async function cmdInfo(filePath) {
   if (!existeArchivo(filePath)) {
     printError(filePath, ['Archivo no existe']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   const tipo = detectarTipo(filePath);
   const content = fs.readFileSync(filePath, 'utf8');
@@ -102,7 +103,7 @@ async function cmdApply(planPath) {
   if (!existeArchivo(planPath)) {
     printError(planPath, ['Plan no existe']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   let plan;
@@ -111,7 +112,7 @@ async function cmdApply(planPath) {
   } catch (e) {
     printError(planPath, ['JSON invalido: ' + e.message]);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   const planes = Array.isArray(plan) ? plan : [plan];
@@ -143,7 +144,7 @@ async function cmdApply(planPath) {
       reporte.rollback.forEach(r => console.log('     ' + (r.ok ? '✅' : '❌') + ' ' + r.file));
     }
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   console.log('───────────────────────────────────────────');
@@ -251,7 +252,7 @@ async function cmdAnalyze(filePath, args) {
   if (!existeArchivo(filePath)) {
     printError(filePath, ['Archivo no existe']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   // Parsear args: --from "..." --until "..." --to "..." --style mixin
@@ -261,7 +262,7 @@ async function cmdAnalyze(filePath, args) {
     printError(filePath, ['Falta --from "marcador inicio"']);
     console.log('   Ej: --from "// ===== TELEGRAM BACKUP =====" --until "// ===== SEGURIDAD ====="');
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   const content = fs.readFileSync(filePath, 'utf8');
@@ -309,7 +310,7 @@ async function cmdAnalyze(filePath, args) {
   if (!analisis.ok) {
     printError(filePath, [analisis.error]);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   // Si hay --to, validar que no exista
@@ -367,7 +368,7 @@ async function cmdRefactor(filePath, args) {
   if (!existeArchivo(filePath)) {
     printError(filePath, ['Archivo no existe']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   const opts = parsearArgs(args);
@@ -375,18 +376,18 @@ async function cmdRefactor(filePath, args) {
   if (!opts.from) {
     printError(filePath, ['Falta --from "marcador inicio"']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   if (!opts.to) {
     printError(filePath, ['Falta --to "archivo destino"']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   if (!opts.apply) {
     console.log('  ⚠ Falta --apply. Usa "analyze" primero para revisar.');
     console.log('     O corre de nuevo con --apply al final.');
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   const content = fs.readFileSync(filePath, 'utf8');
@@ -395,7 +396,7 @@ async function cmdRefactor(filePath, args) {
   if (!analisis.ok) {
     printError(filePath, [analisis.error]);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   console.log('  Analisis: ' + analisis.metodos.length + ' metodos · ' + analisis.lineas + ' lineas');
@@ -418,7 +419,7 @@ async function cmdRefactor(filePath, args) {
       console.log('     Backup: ' + reporte.backupOrigen);
     }
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   console.log('===========================================');
   console.log('  REFACTOR APLICADO');
@@ -478,7 +479,7 @@ async function cmdRefs(args) {
     printError('', ['Falta el simbolo a buscar']);
     console.log('   Uso: node toolkit.mjs refs <simbolo> [--dir src] [--exclude file]');
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   const simbolo = args[0];
@@ -494,7 +495,7 @@ async function cmdRefs(args) {
   if (!fs.existsSync(opts.dir)) {
     printError(opts.dir, ['Directorio no existe']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   console.log('  Simbolo: ' + simbolo);
@@ -544,7 +545,7 @@ async function cmdRefsMulti(args) {
   if (!simbolosFile || !existeArchivo(simbolosFile)) {
     printError('', ['Uso: node toolkit.mjs refs-multi <archivo.txt|json> [--dir src]']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   let simbolos;
@@ -582,7 +583,7 @@ async function cmdSearch(args) {
     printError('', ['Falta el patron a buscar']);
     console.log('   Uso: node toolkit.mjs search "texto" --dir src --ext .vue,.js');
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   const patron = args[0];
   const opts = { dir: 'src', ext: null, ignoreCase: false, usarRegex: false, contexto: 0, excluir: [] };
@@ -598,7 +599,7 @@ async function cmdSearch(args) {
   if (!fs.existsSync(opts.dir)) {
     printError(opts.dir, ['Directorio no existe']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   console.log('  Patron: ' + c.amarillo(patron));
   console.log('  Directorio: ' + c.cian(opts.dir));
@@ -631,7 +632,7 @@ async function cmdTree(args) {
   if (!fs.existsSync(dir)) {
     printError(dir, ['Directorio no existe']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   let opts = { maxDepth: 4, mostrarTamanos: true, mostrarLineas: false, soloDirs: false };
   for (let i = 1; i < args.length; i++) {
@@ -658,7 +659,7 @@ async function cmdStats(args) {
   if (!fs.existsSync(dir)) {
     printError(dir, ['Directorio no existe']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   const st = statsProyecto(dir);
   console.log('  Directorio: ' + c.cian(dir));
@@ -689,13 +690,13 @@ async function cmdDiff(args) {
   if (args.length < 1) {
     printError('', ['Uso: node toolkit.mjs diff <archivo> --context 3']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   const archivo = args[0];
   if (!fs.existsSync(archivo)) {
     printError(archivo, ['Archivo no existe']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   let contexto = 3;
   for (let i = 1; i < args.length; i++) {
@@ -734,13 +735,13 @@ async function cmdPlanNew(args) {
   if (args.length < 1) {
     printError('', ['Uso: node toolkit.mjs plan:new <archivo destino>']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   const destino = args[0];
   if (fs.existsSync(destino)) {
     printError(destino, ['Ya existe ese archivo']);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   const plantilla = {
     file: 'src/App.vue',
@@ -763,7 +764,7 @@ async function cmdConfig(args) {
   if (error) {
     printError('', [error]);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
   if (!encontrado) {
     console.log('  No hay .toolkitrc.json en este proyecto.');
@@ -834,7 +835,7 @@ async function cmdUndo(args) {
   if (!r.ok) {
     console.log('  ' + c.rojo(r.error));
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   console.log('  Deshechos: ' + r.cantidad + ' cambio(s)');
@@ -905,7 +906,7 @@ async function cmdSave(args) {
     console.error('  Falta el mensaje de commit');
     console.log('  Uso: node toolkit.mjs save "feat: añadir algo"');
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   let push = true;
@@ -1024,7 +1025,7 @@ async function cmdMake(args) {
   if (!nombre) {
     console.error('  Falta el nombre del archivo');
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   const opts = {};
@@ -1038,7 +1039,7 @@ async function cmdMake(args) {
   if (!r.ok) {
     console.log('  ' + c.rojo('FALLO') + '  ' + r.error);
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   console.log('  ' + c.verde('Creado') + '  ' + c.cian(r.archivo));
@@ -1069,7 +1070,7 @@ async function cmdAction(args) {
   if (!repo) {
     console.log('  ' + c.rojo('No es un repo de GitHub'));
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   const info = infoUltimoCommit(dirBase);
@@ -1115,13 +1116,13 @@ async function cmdWatch(args) {
   if (!fs.existsSync(dir)) {
     console.log('  ' + c.rojo('Directorio no existe: ' + dir));
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   if (plan && !fs.existsSync(plan)) {
     console.log('  ' + c.rojo('Plan no existe: ' + plan));
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   console.log('  Directorio: ' + c.cian(dir));
@@ -1315,7 +1316,7 @@ async function cmdOrphans(args) {
     if (!fs.existsSync(srcDir)) {
       console.log('  ' + c.rojo('No hay carpeta src/'));
       printFooter();
-      process.exit(1);
+    throw { _toolkit_exit: true };
     }
     const archivos = [];
     function walk(dir) {
@@ -1360,7 +1361,7 @@ async function cmdOrphans(args) {
   if (!fs.existsSync(archivo)) {
     console.log('  ' + c.rojo('Archivo no existe: ' + archivo));
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   const r = detectarHuerfanos(archivo, dirBase);
@@ -1368,7 +1369,7 @@ async function cmdOrphans(args) {
   if (!r.ok) {
     console.log('  ' + c.rojo('Error: ' + r.error));
     printFooter();
-    process.exit(1);
+    throw { _toolkit_exit: true };
   }
 
   console.log('  Archivo: ' + c.cian(archivo));
@@ -1523,6 +1524,25 @@ EJEMPLO:
 `);
 }
 
+
+// ============================================================
+// MANEJADOR GLOBAL DE ERRORES (Evita process.exit en funciones)
+// ============================================================
+process.on('uncaughtException', (err) => {
+  if (err && err._toolkit_exit === true) process.exit(1);
+  console.error('
+💥 Error inesperado:', err.message || err);
+  if (typeof printFooter === 'function') printFooter();
+    throw { _toolkit_exit: true };
+});
+
+process.on('unhandledRejection', (reason) => {
+  if (reason && reason._toolkit_exit === true) process.exit(1);
+  console.error('
+💥 Promesa rechazada:', reason.message || reason);
+  if (typeof printFooter === 'function') printFooter();
+    throw { _toolkit_exit: true };
+});
 // ============================================================
 // DISPATCHER
 // ============================================================
