@@ -1,0 +1,15 @@
+node_modules/
+*.log
+*.bak
+*.bak-*
+*.bak2-*
+*.tmp-*
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Scripts de instalación (no van al repo)
+add-comandos.mjs
+add-multi.mjs
+fix-bugs.mjs
