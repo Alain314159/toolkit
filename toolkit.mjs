@@ -10,6 +10,12 @@ import { aplicarOp } from './lib/patch.mjs';
 import { analizar, formatearReporte } from './lib/analyze.mjs';
 import { aplicarRefactor, generarMixin } from './lib/refactor.mjs';
 import { buscarReferencias, buscarMultiplesReferencias, contarReferencias } from './lib/refs.mjs';
+import { buscarTexto } from './lib/search.mjs';
+import { arbolProyecto, formatearBytes } from './lib/tree.mjs';
+import { statsProyecto } from './lib/stats.mjs';
+import { diffLineas, resumenDiff } from './lib/diff.mjs';
+import { c } from './lib/colors.mjs';
+import { buscarConfig, configDefault } from './lib/config.mjs';
 import { aplicarPlanTransaccional } from './lib/patch.mjs';
 import { printHeader, printSuccess, printSkipped, printError, printFooter, printBackup, printInfo } from './lib/report.mjs';
 
@@ -446,6 +452,208 @@ async function cmdRefsMulti(args) {
   printFooter();
 }
 
+async function cmdSearch(args) {
+  printHeader('BUSCAR');
+  if (args.length < 1) {
+    printError('', ['Falta el patron a buscar']);
+    console.log('   Uso: node toolkit.mjs search "texto" --dir src --ext .vue,.js');
+    printFooter();
+    process.exit(1);
+  }
+  const patron = args[0];
+  const opts = { dir: 'src', ext: null, ignoreCase: false, usarRegex: false, contexto: 0, excluir: [] };
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--dir') opts.dir = args[++i];
+    else if (a === '--ext') opts.ext = args[++i].split(',').map(e => e.trim().startsWith('.') ? e.trim() : '.' + e.trim());
+    else if (a === '--ignore-case' || a === '-i') opts.ignoreCase = true;
+    else if (a === '--regex') opts.usarRegex = true;
+    else if (a === '--context') opts.contexto = parseInt(args[++i]) || 0;
+    else if (a === '--exclude') opts.excluir.push(args[++i]);
+  }
+  if (!fs.existsSync(opts.dir)) {
+    printError(opts.dir, ['Directorio no existe']);
+    printFooter();
+    process.exit(1);
+  }
+  console.log('  Patron: ' + c.amarillo(patron));
+  console.log('  Directorio: ' + c.cian(opts.dir));
+  console.log('');
+  const refs = buscarTexto(opts.dir, patron, opts);
+  if (refs.length === 0) {
+    console.log('  (sin coincidencias)');
+    printFooter();
+    return;
+  }
+  console.log('-------------------------------------------');
+  for (const r of refs) {
+    console.log('');
+    console.log('  ' + c.cian(r.archivo) + ' (' + r.total + ')');
+    for (const m of r.matches.slice(0, 10)) {
+      console.log('     L' + m.linea + ': ' + m.texto.slice(0, 100));
+    }
+    if (r.matches.length > 10) {
+      console.log('     ... (' + (r.matches.length - 10) + ' mas)');
+    }
+  }
+  console.log('');
+  console.log('  Total: ' + refs.length + ' archivo(s), ' + refs.reduce((sum, r) => sum + r.total, 0) + ' coincidencia(s)');
+  printFooter();
+}
+
+async function cmdTree(args) {
+  printHeader('ARBOL DEL PROYECTO');
+  const dir = args[0] || '.';
+  if (!fs.existsSync(dir)) {
+    printError(dir, ['Directorio no existe']);
+    printFooter();
+    process.exit(1);
+  }
+  let opts = { maxDepth: 4, mostrarTamanos: true, mostrarLineas: false, soloDirs: false };
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--depth') opts.maxDepth = parseInt(args[++i]) || 4;
+    else if (args[i] === '--no-sizes') opts.mostrarTamanos = false;
+    else if (args[i] === '--lines') opts.mostrarLineas = true;
+    else if (args[i] === '--dirs-only') opts.soloDirs = true;
+  }
+  const { arbol, stats } = arbolProyecto(dir, opts);
+  console.log(arbol);
+  console.log('');
+  console.log('-------------------------------------------');
+  console.log('  ' + stats.totalArchivos + ' archivo(s) · ' + stats.totalDirs + ' carpeta(s)');
+  console.log('  Tamano total: ' + formatearBytes(stats.totalBytes));
+  if (opts.mostrarLineas) {
+    console.log('  Lineas totales: ' + stats.totalLineas);
+  }
+  printFooter();
+}
+
+async function cmdStats(args) {
+  printHeader('ESTADISTICAS');
+  const dir = args[0] || '.';
+  if (!fs.existsSync(dir)) {
+    printError(dir, ['Directorio no existe']);
+    printFooter();
+    process.exit(1);
+  }
+  const st = statsProyecto(dir);
+  console.log('  Directorio: ' + c.cian(dir));
+  console.log('  Archivos:   ' + st.totalArchivos);
+  console.log('  Tamano:     ' + formatearBytes(st.totalBytes));
+  console.log('  Lineas:     ' + st.totalLineas + ' (' + st.totalLineasVacias + ' vacias)');
+  console.log('');
+  console.log('-------------------------------------------');
+  console.log('  POR EXTENSION');
+  console.log('-------------------------------------------');
+  const extOrdenadas = Object.entries(st.porExt).sort((a, b) => b[1].bytes - a[1].bytes);
+  for (const [ext, info] of extOrdenadas) {
+    const nombre = ext.padEnd(12);
+    console.log('  ' + nombre + String(info.archivos).padStart(5) + ' arch  ' + formatearBytes(info.bytes).padStart(10) + '  ' + String(info.lineas).padStart(6) + ' lineas');
+  }
+  console.log('');
+  console.log('-------------------------------------------');
+  console.log('  ARCHIVOS MAS GRANDES');
+  console.log('-------------------------------------------');
+  for (const a of st.masGrandes) {
+    console.log('  ' + formatearBytes(a.bytes).padStart(10) + '  ' + String(a.lineas).padStart(6) + ' lineas  ' + a.archivo);
+  }
+  printFooter();
+}
+
+async function cmdDiff(args) {
+  printHeader('DIFF');
+  if (args.length < 1) {
+    printError('', ['Uso: node toolkit.mjs diff <archivo> --context 3']);
+    printFooter();
+    process.exit(1);
+  }
+  const archivo = args[0];
+  if (!fs.existsSync(archivo)) {
+    printError(archivo, ['Archivo no existe']);
+    printFooter();
+    process.exit(1);
+  }
+  let contexto = 3;
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--context') contexto = parseInt(args[++i]) || 3;
+  }
+  const dir = path.dirname(archivo);
+  const base = path.basename(archivo);
+  const candidatos = fs.readdirSync(dir)
+    .filter(f => f.startsWith(base + '.bak-'))
+    .map(f => ({ f, ts: parseInt(f.split('.bak-')[1]) || 0 }))
+    .sort((a, b) => b.ts - a.ts);
+  if (candidatos.length === 0) {
+    console.log('  (no hay backups)');
+    printFooter();
+    return;
+  }
+  const backupPath = path.join(dir, candidatos[0].f);
+  const antes = fs.readFileSync(backupPath, 'utf8');
+  const despues = fs.readFileSync(archivo, 'utf8');
+  const res = resumenDiff(antes, despues);
+  if (res.add === 0 && res.del === 0) {
+    console.log('  (sin cambios)');
+    printFooter();
+    return;
+  }
+  console.log('  Backup: ' + c.gris(path.basename(backupPath)));
+  console.log('  Actual: ' + c.cian(archivo));
+  console.log('  ' + c.verde('+' + res.add) + ' / ' + c.rojo('-' + res.del));
+  console.log('');
+  console.log(diffLineas(antes, despues, { contexto }));
+  printFooter();
+}
+
+async function cmdPlanNew(args) {
+  printHeader('NUEVO PLAN');
+  if (args.length < 1) {
+    printError('', ['Uso: node toolkit.mjs plan:new <archivo destino>']);
+    printFooter();
+    process.exit(1);
+  }
+  const destino = args[0];
+  if (fs.existsSync(destino)) {
+    printError(destino, ['Ya existe ese archivo']);
+    printFooter();
+    process.exit(1);
+  }
+  const plantilla = {
+    file: 'src/App.vue',
+    idempotent: 'MI_MARCA_UNICA',
+    ops: [
+      { replace: { old: 'texto viejo', new: 'texto nuevo' } }
+    ]
+  };
+  fs.writeFileSync(destino, JSON.stringify(plantilla, null, 2) + '\n');
+  console.log('  Creado: ' + c.cian(destino));
+  console.log('');
+  console.log('  Editalo y despues:');
+  console.log('    node toolkit.mjs apply ' + destino);
+  printFooter();
+}
+
+async function cmdConfig(args) {
+  printHeader('CONFIGURACION');
+  const { encontrado, ruta, config, error } = buscarConfig();
+  if (error) {
+    printError('', [error]);
+    printFooter();
+    process.exit(1);
+  }
+  if (!encontrado) {
+    console.log('  No hay .toolkitrc.json en este proyecto.');
+    console.log('');
+    console.log('  Config por defecto:');
+    console.log(JSON.stringify(configDefault(), null, 2));
+  } else {
+    console.log('  Encontrado: ' + c.cian(ruta));
+    console.log('');
+    console.log(JSON.stringify(config, null, 2));
+  }
+  printFooter();
+}
+
 async function cmdHelp() {
   console.log(`
 toolkit - Herramienta universal de parcheo y validacion
@@ -459,6 +667,14 @@ COMANDOS:
   apply <plan.json>                  Aplica un plan de parcheo
   analyze <archivo> [opciones]       Analiza un refactor SIN aplicar
   refactor <archivo> [opciones]      Aplica un refactor
+  refs <simbolo> [opciones]          Busca referencias a un simbolo
+  refs-multi <archivo> [opciones]    Busca referencias a varios simbolos
+  search <patron> [opciones]         Busca texto literal en el proyecto
+  tree [dir] [opciones]              Muestra el arbol del proyecto
+  stats [dir]                        Estadisticas del proyecto
+  diff <archivo> [opciones]          Muestra los cambios vs el backup
+  plan:new <archivo>                 Crea un plan vacio
+  config                             Muestra la configuracion
   help                               Muestra esta ayuda
 
 OPCIONES DE ANALYZE/REFACTOR:
@@ -466,6 +682,25 @@ OPCIONES DE ANALYZE/REFACTOR:
   --until "texto"      Marcador donde termina (opcional)
   --to "ruta.js"       Archivo destino
   --apply              Confirmar aplicacion (solo refactor)
+
+OPCIONES DE REFS:
+  --dir <dir>          Directorio donde buscar (default: src)
+  --exclude <file>     Archivo a excluir (repetible)
+  --context <n>        Lineas de contexto alrededor (default: 0)
+
+OPCIONES DE SEARCH:
+  --dir <dir>          Directorio donde buscar (default: src)
+  --ext <exts>         Extensiones separadas por coma (.vue,.js)
+  --ignore-case, -i    Ignorar mayusculas/minusculas
+  --regex              Tratar el patron como regex
+  --context <n>        Lineas de contexto
+  --exclude <file>     Archivo a excluir
+
+OPCIONES DE TREE:
+  --depth <n>          Profundidad maxima (default: 4)
+  --lines              Mostrar cantidad de lineas
+  --no-sizes           No mostrar tamanos
+  --dirs-only          Solo mostrar carpetas
 
 EJEMPLO:
   node toolkit.mjs analyze src/App.vue --from "// ===== TELEGRAM BACKUP =====" --until "// ===== SEGURIDAD =====" --to "src/mixins/telegram.js"
@@ -512,6 +747,12 @@ switch (comando) {
   case 'validate': await cmdValidate(args[0]); break;
   case 'info': await cmdInfo(args[0]); break;
   case 'apply': await cmdApply(args[0]); break;
+  case 'search': await cmdSearch(args); break;
+  case 'tree': await cmdTree(args); break;
+  case 'stats': await cmdStats(args); break;
+  case 'diff': await cmdDiff(args); break;
+  case 'plan:new': await cmdPlanNew(args); break;
+  case 'config': await cmdConfig(args); break;
   case 'refs': await cmdRefs(args); break;
   case 'refs-multi': await cmdRefsMulti(args); break;
   case 'analyze': await cmdAnalyze(args[0], args.slice(1)); break;
