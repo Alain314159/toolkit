@@ -1,5 +1,5 @@
-import { ToolkitError } from './utils/errors.mjs';
 #!/usr/bin/env node
+import { ToolkitError } from './utils/errors.mjs';
 // toolkit.mjs - Herramienta universal de parcheo y validacion
 
 import fs from 'fs';
@@ -1530,16 +1530,14 @@ EJEMPLO:
 // ============================================================
 process.on('uncaughtException', (err) => {
   if (err && err._toolkit_exit === true) process.exit(1);
-  console.error('
-💥 Error inesperado:', err.message || err);
+  console.error('💥 Error inesperado:', err.message || err);
   if (typeof printFooter === 'function') printFooter();
     throw { _toolkit_exit: true };
 });
 
 process.on('unhandledRejection', (reason) => {
   if (reason && reason._toolkit_exit === true) process.exit(1);
-  console.error('
-💥 Promesa rechazada:', reason.message || reason);
+  console.error('💥 Promesa rechazada:', reason.message || reason);
   if (typeof printFooter === 'function') printFooter();
     throw { _toolkit_exit: true };
 });
