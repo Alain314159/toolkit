@@ -26,6 +26,7 @@ import { urlActions, urlCommit, infoUltimoCommit, detectarRepo } from './lib/act
 import { crearMenu, pedirTexto, pedirConfirmacion } from './lib/menu.mjs';
 import { vigilar } from './lib/watch.mjs';
 import { detectarHuerfanos } from './lib/orphans.mjs';
+import { openVue, esVue } from './lib/vue.mjs';
 import { aplicarPlanTransaccional } from './lib/patch.mjs';
 import { printHeader, printSuccess, printSkipped, printError, printFooter, printBackup, printInfo } from './lib/report.mjs';
 
@@ -1390,6 +1391,326 @@ async function cmdOrphans(args) {
   printFooter();
 }
 
+// ============================================================
+// COMANDOS VUE (usan lib/vue.mjs con AST real)
+// ============================================================
+
+async function cmdVueInfo(args) {
+  const archivo = args[0];
+  printHeader('VUE INFO');
+  if (!archivo || !existeArchivo(archivo)) {
+    printError(archivo || '', ['Falta archivo o no existe']);
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+  if (!esVue(archivo)) {
+    printError(archivo, ['No es un archivo .vue']);
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+
+  const vue = await openVue(archivo);
+  const metodos = vue.getMethods();
+  const computed = vue.getComputed();
+  const data = vue.getDataFields();
+  const secciones = vue.getTemplateSections();
+  const { orphans, rotos } = vue.checkOrphans();
+
+  console.log('  Archivo:      ' + c.cian(archivo));
+  console.log('  Métodos:      ' + metodos.length);
+  console.log('  Computed:     ' + computed.length);
+  console.log('  Data fields:  ' + data.length);
+  console.log('  Secciones:    ' + secciones.length);
+  console.log('  Huérfanos:    ' + c.amarillo(orphans.length));
+  console.log('  Rotos:        ' + (rotos.length > 0 ? c.rojo(rotos.length) : c.verde(0)));
+  console.log('');
+
+  if (secciones.length > 0) {
+    console.log('  Secciones del template:');
+    for (const s of secciones) {
+      console.log('    · ' + s.nombre);
+    }
+  }
+  printFooter();
+}
+
+async function cmdVueMethods(args) {
+  const archivo = args[0];
+  printHeader('VUE METHODS');
+  if (!archivo || !existeArchivo(archivo)) {
+    printError(archivo || '', ['Falta archivo']);
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+
+  const vue = await openVue(archivo);
+  const metodos = vue.getMethods();
+  console.log('  Total: ' + metodos.length);
+  console.log('');
+  for (const m of metodos) {
+    console.log('  · ' + m.nombre + (m.async ? ' ' + c.gris('[async]') : ''));
+  }
+  printFooter();
+}
+
+async function cmdVueComputed(args) {
+  const archivo = args[0];
+  printHeader('VUE COMPUTED');
+  if (!archivo || !existeArchivo(archivo)) {
+    printError(archivo || '', ['Falta archivo']);
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+
+  const vue = await openVue(archivo);
+  const computed = vue.getComputed();
+  console.log('  Total: ' + computed.length);
+  console.log('');
+  for (const c of computed) {
+    console.log('  · ' + c.nombre);
+  }
+  printFooter();
+}
+
+async function cmdVueData(args) {
+  const archivo = args[0];
+  printHeader('VUE DATA');
+  if (!archivo || !existeArchivo(archivo)) {
+    printError(archivo || '', ['Falta archivo']);
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+
+  const vue = await openVue(archivo);
+  const data = vue.getDataFields();
+  console.log('  Total: ' + data.length);
+  console.log('');
+  for (const d of data) {
+    console.log('  · ' + d.nombre);
+  }
+  printFooter();
+}
+
+async function cmdVueSections(args) {
+  const archivo = args[0];
+  printHeader('VUE SECCIONES');
+  if (!archivo || !existeArchivo(archivo)) {
+    printError(archivo || '', ['Falta archivo']);
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+
+  const vue = await openVue(archivo);
+  const secciones = vue.getTemplateSections();
+  console.log('  Total: ' + secciones.length);
+  console.log('');
+  for (const s of secciones) {
+    console.log('  · ' + s.nombre);
+  }
+  printFooter();
+}
+
+async function cmdVueOrphans(args) {
+  const archivo = args[0];
+  printHeader('VUE HUERFANOS');
+  if (!archivo || !existeArchivo(archivo)) {
+    printError(archivo || '', ['Falta archivo']);
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+
+  const json = args.includes('--json');
+
+  const vue = await openVue(archivo);
+  const { orphans, rotos } = vue.checkOrphans();
+
+  if (json) {
+    console.log(JSON.stringify({ orphans, rotos }, null, 2));
+    return;
+  }
+
+  console.log('  Archivo: ' + c.cian(archivo));
+  console.log('');
+
+  if (orphans.length === 0 && rotos.length === 0) {
+    console.log('  ' + c.verde('✅ Sin huérfanos ni rotos'));
+    printFooter();
+    return;
+  }
+
+  if (orphans.length > 0) {
+    console.log('  ' + c.amarillo('⚠ ' + orphans.length + ' huérfano(s):'));
+    console.log('');
+    const porTipo = { metodo: [], computed: [], data: [] };
+    for (const o of orphans) {
+      if (porTipo[o.tipo]) porTipo[o.tipo].push(o.nombre);
+    }
+    for (const [tipo, nombres] of Object.entries(porTipo)) {
+      if (nombres.length === 0) continue;
+      console.log('  ' + c.negrita(tipo + ' (' + nombres.length + '):'));
+      for (const n of nombres) {
+        console.log('    · ' + n);
+      }
+      console.log('');
+    }
+  }
+
+  if (rotos.length > 0) {
+    console.log('  ' + c.rojo('❌ ' + rotos.length + ' roto(s) (usados en template sin definición):'));
+    console.log('');
+    for (const r of rotos) {
+      console.log('    · ' + r);
+    }
+    console.log('');
+  }
+
+  printFooter();
+}
+
+async function cmdVueRm(args) {
+  // Uso: vue:rm <archivo> --method <nombre> | --computed <nombre> | --data <nombre>
+  //      [--dry-run] [--all]
+  printHeader('VUE REMOVE');
+  const archivo = args[0];
+  if (!archivo || !existeArchivo(archivo)) {
+    printError(archivo || '', ['Falta archivo']);
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+
+  let method = null, computed = null, dataField = null;
+  let dryRun = false;
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--method') method = args[++i];
+    else if (args[i] === '--computed') computed = args[++i];
+    else if (args[i] === '--data') dataField = args[++i];
+    else if (args[i] === '--dry-run' || args[i] === '-n') dryRun = true;
+  }
+
+  const vue = await openVue(archivo);
+  const eliminados = [];
+
+  if (method) {
+    if (vue.removeMethod(method)) eliminados.push('method.' + method);
+    else { console.log('  ' + c.rojo('Método no encontrado: ' + method)); throw { _toolkit_exit: true }; }
+  }
+  if (computed) {
+    if (vue.removeComputed(computed)) eliminados.push('computed.' + computed);
+    else { console.log('  ' + c.rojo('Computed no encontrado: ' + computed)); throw { _toolkit_exit: true }; }
+  }
+  if (dataField) {
+    if (vue.removeDataField(dataField)) eliminados.push('data.' + dataField);
+    else { console.log('  ' + c.rojo('Data field no encontrado: ' + dataField)); throw { _toolkit_exit: true }; }
+  }
+
+  if (eliminados.length === 0) {
+    console.log('  ' + c.amarillo('Nada para eliminar. Usa --method / --computed / --data'));
+    printFooter();
+    return;
+  }
+
+  console.log('  Eliminados (' + eliminados.length + '):');
+  for (const e of eliminados) console.log('    · ' + e);
+  console.log('');
+
+  if (dryRun) {
+    console.log('  ' + c.amarillo('DRY-RUN') + ' (no se escribió nada)');
+    printFooter();
+    return;
+  }
+
+  const r = vue.save();
+  if (r.ok) {
+    console.log('  ' + c.verde('✅ Guardado'));
+    if (r.backup) console.log('  Backup: ' + r.backup);
+  } else {
+    console.log('  ' + c.rojo('❌ Error al guardar:'));
+    r.errors.forEach(e => console.log('    · ' + e));
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+  printFooter();
+}
+
+async function cmdVueRmAll(args) {
+  // Uso: vue:rm-all <archivo> [--dry-run]
+  printHeader('VUE REMOVE ALL ORPHANS');
+  const archivo = args[0];
+  if (!archivo || !existeArchivo(archivo)) {
+    printError(archivo || '', ['Falta archivo']);
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+
+  const dryRun = args.includes('--dry-run') || args.includes('-n');
+
+  // Cargamos una sola vez
+  const vue = await openVue(archivo);
+  const { orphans } = vue.checkOrphans();
+
+  if (orphans.length === 0) {
+    console.log('  ' + c.verde('No hay huérfanos'));
+    printFooter();
+    return;
+  }
+
+  console.log('  Huérfanos detectados: ' + c.amarillo(orphans.length));
+  console.log('');
+
+  // Eliminar TODOS en la misma instancia
+  const eliminados = [];
+  const fallidos = [];
+
+  for (const o of orphans) {
+    try {
+      let ok = false;
+      if (o.tipo === 'metodo') ok = vue.removeMethod(o.nombre);
+      else if (o.tipo === 'computed') ok = vue.removeComputed(o.nombre);
+      else if (o.tipo === 'data') ok = vue.removeDataField(o.nombre);
+      if (ok) eliminados.push(o.tipo + '.' + o.nombre);
+      else fallidos.push(o.tipo + '.' + o.nombre + ' (no encontrado)');
+    } catch (e) {
+      fallidos.push(o.tipo + '.' + o.nombre + ' (' + e.message + ')');
+    }
+  }
+
+  console.log('  Eliminados: ' + eliminados.length);
+  for (const e of eliminados) console.log('    · ' + e);
+  if (fallidos.length > 0) {
+    console.log('');
+    console.log('  ' + c.rojo('Fallidos: ' + fallidos.length));
+    for (const f of fallidos) console.log('    · ' + f);
+  }
+  console.log('');
+
+  if (dryRun) {
+    console.log('  ' + c.amarillo('DRY-RUN') + ' (no se escribió nada)');
+    printFooter();
+    return;
+  }
+
+  // Validar y guardar
+  const v = vue.validate();
+  if (!v.ok) {
+    console.log('  ' + c.rojo('❌ Validación falló, NO se escribió nada:'));
+    v.errors.forEach(e => console.log('    · ' + e));
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+
+  const r = vue.save();
+  if (r.ok) {
+    console.log('  ' + c.verde('✅ Guardado'));
+    if (r.backup) console.log('  Backup: ' + r.backup);
+  } else {
+    console.log('  ' + c.rojo('❌ Error al guardar:'));
+    r.errors.forEach(e => console.log('    · ' + e));
+    printFooter();
+    throw { _toolkit_exit: true };
+  }
+  printFooter();
+}
+
 async function cmdHelp() {
   console.log(`
 toolkit - Herramienta universal de parcheo y validacion
@@ -1415,7 +1736,17 @@ COMANDOS:
   undo [n] [opciones]                Deshacer ultimos cambios
   verify [opciones]                  Validar + tests + build + git status
   save "mensaje" [opciones]          Commit + push rapido
-  orphans [archivo]                  Detecta metodos sin uso
+  orphans [archivo]                  Detecta metodos sin uso (regex simple)
+  vue:info <archivo.vue>             Info completa de un .vue
+  vue:methods <archivo.vue>          Lista métodos
+  vue:computed <archivo.vue>         Lista computeds
+  vue:data <archivo.vue>             Lista data fields
+  vue:sections <archivo.vue>         Lista secciones del template
+  vue:orphans <archivo.vue>          Detecta huérfanos/rotos (AST real)
+  vue:rm <archivo> --method|--computed|--data <nombre>
+                                     Elimina 1 método/computed/data
+  vue:rm-all <archivo>               Elimina TODOS los huérfanos
+                                     (ambos soportan --dry-run)
   fix [opciones]                     Detecta y arregla problemas comunes
   make:<tipo> <nombre>               Crea un archivo desde plantilla
   action [open]                      Info y URL de GitHub Actions
@@ -1549,6 +1880,14 @@ switch (comando) {
   case 'validate': await cmdValidate(args[0], args.slice(1)); break;
   case 'info': await cmdInfo(args[0]); break;
   case 'apply': await cmdApply(args[0]); break;
+  case 'vue:info': await cmdVueInfo(args); break;
+  case 'vue:methods': await cmdVueMethods(args); break;
+  case 'vue:computed': await cmdVueComputed(args); break;
+  case 'vue:data': await cmdVueData(args); break;
+  case 'vue:sections': await cmdVueSections(args); break;
+  case 'vue:orphans': await cmdVueOrphans(args); break;
+  case 'vue:rm': await cmdVueRm(args); break;
+  case 'vue:rm-all': await cmdVueRmAll(args); break;
   case 'orphans': await cmdOrphans(args); break;
   case 'fix': await cmdFix(args); break;
   case 'make': await cmdMakeHelp(); break;
